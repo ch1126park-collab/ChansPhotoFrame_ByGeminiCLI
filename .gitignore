@@ -1,0 +1,25 @@
+*.jks
+*.keystore
+
+# Photo data
+test_photos/
+test_numbers/
+test_v_numbers/
+photo_data/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Gradle
+.gradle/
+build/
+app/build/
+gradle-app.setting
+!gradle-wrapper.jar
+
+# Log/Temp
+*.log
+*.hprof
+*.pyc

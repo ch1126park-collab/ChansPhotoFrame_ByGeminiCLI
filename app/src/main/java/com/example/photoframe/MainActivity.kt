@@ -238,8 +238,17 @@ fun PhotoSlideshow(settings: AppSettings, birthCal: Calendar, onOpenSettings: ()
             db.rawQuery("SELECT path, width, height, exif_date, lat, lng FROM photos", null).use { c -> while (c.moveToNext()) initialList.add(SimplePhoto(c.getString(0), c.getInt(1), c.getInt(2), c.getLong(3), c.getDouble(4), c.getDouble(5))) }
             withContext(Dispatchers.Main) { photoPool = initialList }
             val photoDir = File(Environment.getExternalStorageDirectory(), "Media/Photoframe")
+            if (!photoDir.exists()) photoDir.mkdirs()
             if (photoDir.exists()) {
-                photoDir.walk().filter { it.isFile && it.extension.lowercase() in listOf("jpg", "jpeg", "png") }.forEach { file ->
+                val files = mutableListOf<File>()
+                fun scanRecursive(dir: File) {
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isDirectory) scanRecursive(f)
+                        else if (f.isFile && f.extension.lowercase() in listOf("jpg", "jpeg", "png")) files.add(f)
+                    }
+                }
+                scanRecursive(photoDir)
+                files.forEach { file ->
                     val c = db.rawQuery("SELECT last_modified FROM photos WHERE path = ?", arrayOf(file.absolutePath))
                     if (!c.moveToFirst() || c.getLong(0) != file.lastModified()) {
                         val exif = ExifInterface(file.absolutePath); val (w, h) = getImageDimensions(file); val exifD = getExifDate(file); val ll = FloatArray(2); exif.getLatLong(ll)

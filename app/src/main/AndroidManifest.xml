@@ -9,7 +9,8 @@
     <application
         android:allowBackup="true"
         android:label="PhotoFrame"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:requestLegacyExternalStorage="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

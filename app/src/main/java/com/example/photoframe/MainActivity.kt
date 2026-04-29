@@ -429,4 +429,3 @@ private fun extractEnhancedMetadata(context: Context, f: File, b: Calendar): Pho
 private fun getTransitionSpec(t: TransitionType): ContentTransform {
     val d = 1500; return when (t) { TransitionType.FADE -> fadeIn(tween(d)) togetherWith fadeOut(tween(d)); TransitionType.SCALE -> scaleIn(tween(d), 0.8f) + fadeIn() togetherWith scaleOut(tween(d), 1.2f) + fadeOut(); else -> slideInHorizontally(tween(d), { it }) + fadeIn() togetherWith slideOutHorizontally(tween(d), { -it }) + fadeOut() }
 }
-fun scanPhotos(d: File): List<File> = if (d.exists()) d.walk().filter { it.isFile && it.extension.lowercase() in listOf("jpg", "jpeg", "png") }.toList() else listOf()

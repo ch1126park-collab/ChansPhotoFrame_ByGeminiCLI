@@ -118,7 +118,7 @@ data class PhotoMetadata(
     val textColor: Color = Color.White
 )
 
-data class AppSettings(val isShuffle: Boolean = true, val durationSeconds: Int = 10, val isHighlightMode: Boolean = false, val overlayPos: OverlayPosition = OverlayPosition.AUTO)
+data class AppSettings(val isShuffle: Boolean = true, val durationSeconds: Int = 10, val isHighlightMode: Boolean = false, val overlayPos: OverlayPosition = OverlayPosition.AUTO, val isAutoNightMode: Boolean = true)
 
 class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var prefs: SharedPreferences
@@ -127,6 +127,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var isCharging by mutableStateOf(false)
     private var isFlat by mutableStateOf(false)
     private var isSleepTime by mutableStateOf(false)
+    private var currentLux by mutableStateOf(100f)
 
     val customImageLoader by lazy {
         ImageLoader.Builder(this).memoryCache { MemoryCache.Builder(this).maxSizePercent(0.25).build() }
@@ -143,8 +144,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             CompositionLocalProvider(coil.compose.LocalImageLoader provides customImageLoader) {
                 MaterialTheme(colorScheme = darkColorScheme()) {
                     LaunchedEffect(Unit) { while (true) { isSleepTime = checkIsSleepTime(); updateSystemKeepScreenOn(); delay(60000L) } }
-                    val initialSettings = remember { AppSettings(prefs.getBoolean("is_shuffle", true), prefs.getInt("duration_seconds", 10), prefs.getBoolean("is_highlight", false), OverlayPosition.valueOf(prefs.getString("overlay_pos", "AUTO") ?: "AUTO")) }
-                    PhotoFrameScreen(initialSettings, JAE_HYUN_BIRTH_CAL, ::saveSettings, customImageLoader, isSleepTime, isCharging, isFlat)
+                    val initialSettings = remember { AppSettings(
+                        prefs.getBoolean("is_shuffle", true),
+                        prefs.getInt("duration_seconds", 10),
+                        prefs.getBoolean("is_highlight", false),
+                        OverlayPosition.valueOf(prefs.getString("overlay_pos", "AUTO") ?: "AUTO"),
+                        prefs.getBoolean("is_auto_night", true)
+                    ) }
+                    PhotoFrameScreen(initialSettings, JAE_HYUN_BIRTH_CAL, ::saveSettings, customImageLoader, isSleepTime, isCharging, isFlat, currentLux)
                 }
             }
         }
@@ -155,18 +162,36 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             isCharging = s == BatteryManager.BATTERY_STATUS_CHARGING || s == BatteryManager.BATTERY_STATUS_FULL; updateSystemKeepScreenOn()
         }
     }
-    override fun onResume() { super.onResume(); sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.also { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) } }
+    override fun onResume() { 
+        super.onResume()
+        sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.also { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        sensorManager?.getDefaultSensor(Sensor.TYPE_LIGHT)?.also { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
+    }
     override fun onPause() { super.onPause(); sensorManager?.unregisterListener(this) }
     override fun onDestroy() { super.onDestroy(); unregisterReceiver(powerReceiver) }
-    override fun onSensorChanged(event: SensorEvent?) { if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) { isFlat = abs(event.values[2]) > 9.0 && abs(event.values[0]) < 2.0 && abs(event.values[1]) < 2.0; updateSystemKeepScreenOn() } }
+    override fun onSensorChanged(event: SensorEvent?) { 
+        when (event?.sensor?.type) {
+            Sensor.TYPE_ACCELEROMETER -> { isFlat = abs(event.values[2]) > 9.0 && abs(event.values[0]) < 2.0 && abs(event.values[1]) < 2.0; updateSystemKeepScreenOn() }
+            Sensor.TYPE_LIGHT -> { currentLux = event.values[0] }
+        }
+    }
     override fun onAccuracyChanged(s: Sensor?, a: Int) {}
     private fun checkIsSleepTime(): Boolean = Calendar.getInstance().get(Calendar.HOUR_OF_DAY) in 1..5
     private fun updateSystemKeepScreenOn() { if (!isSleepTime && isCharging && !isFlat) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-    private fun saveSettings(s: AppSettings) { prefs.edit().apply { putBoolean("is_shuffle", s.isShuffle); putInt("duration_seconds", s.durationSeconds); putBoolean("is_highlight", s.isHighlightMode); putString("overlay_pos", s.overlayPos.name); apply() } }
+    private fun saveSettings(s: AppSettings) { 
+        prefs.edit().apply { 
+            putBoolean("is_shuffle", s.isShuffle)
+            putInt("duration_seconds", s.durationSeconds)
+            putBoolean("is_highlight", s.isHighlightMode)
+            putString("overlay_pos", s.overlayPos.name)
+            putBoolean("is_auto_night", s.isAutoNightMode)
+            apply() 
+        } 
+    }
 }
 
 @Composable
-fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSettings: (AppSettings) -> Unit, imageLoader: ImageLoader, isSleepTime: Boolean, isCharging: Boolean, isFlat: Boolean) {
+fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSettings: (AppSettings) -> Unit, imageLoader: ImageLoader, isSleepTime: Boolean, isCharging: Boolean, isFlat: Boolean, currentLux: Float) {
     val context = LocalContext.current
     val requiredPermissions = mutableListOf<String>().apply { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.READ_MEDIA_IMAGES) else add(Manifest.permission.READ_EXTERNAL_STORAGE); add(Manifest.permission.ACCESS_MEDIA_LOCATION) }
     var permissionsGranted by remember { mutableStateOf(requiredPermissions.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }) }
@@ -175,9 +200,13 @@ fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSet
     var settings by remember { mutableStateOf(initialSettings) }
     var isSettingsOpen by remember { mutableStateOf(false) }
     var resetTrigger by remember { mutableStateOf(0) }
+    
+    val isAutoNightActive = settings.isAutoNightMode && currentLux < 10f
+    val isStandby = isSleepTime || !isCharging || isFlat || isAutoNightActive
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         if (permissionsGranted) {
-            if (isSleepTime || !isCharging || isFlat) StandbyScreen(isSleepTime, !isCharging, isFlat)
+            if (isStandby) StandbyScreen(isSleepTime, !isCharging, isFlat, isAutoNightActive)
             else {
                 PhotoSlideshow(settings, birthCal, { isSettingsOpen = true }, resetTrigger, imageLoader)
                 if (isSettingsOpen) SettingsDialog(settings, { settings = it; onSaveSettings(it) }, { isSettingsOpen = false }, { resetTrigger++ })
@@ -187,13 +216,24 @@ fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSet
 }
 
 @Composable
-fun StandbyScreen(isSleep: Boolean, isNotCharging: Boolean, isFlat: Boolean) {
+fun StandbyScreen(isSleep: Boolean, isNotCharging: Boolean, isFlat: Boolean, isDark: Boolean) {
     Box(modifier = Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            val icon = if (isSleep) Icons.Default.NightsStay else if (isNotCharging) Icons.Default.BatteryAlert else Icons.Default.StayCurrentPortrait
-            Icon(icon, null, tint = Color.Gray, modifier = Modifier.size(64.dp))
+            val icon = when {
+                isSleep -> Icons.Default.NightsStay
+                isDark -> Icons.Default.Brightness4
+                isNotCharging -> Icons.Default.BatteryAlert
+                else -> Icons.Default.StayCurrentPortrait
+            }
+            Icon(icon, null, tint = Color.Gray.copy(alpha = 0.5f), modifier = Modifier.size(64.dp))
             Spacer(Modifier.height(16.dp))
-            Text(if (isSleep) "취침 모드" else if (isNotCharging) "충전기 연결 필요" else "보관 모드 (바닥)", color = Color.Gray, fontSize = 20.sp)
+            val statusText = when {
+                isSleep -> "취침 모드"
+                isDark -> "야간 모드 (주변 어두움)"
+                isNotCharging -> "충전기 연결 필요"
+                else -> "보관 모드 (바닥)"
+            }
+            Text(statusText, color = Color.Gray.copy(alpha = 0.5f), fontSize = 20.sp)
         }
     }
 }
@@ -367,6 +407,7 @@ fun SettingsDialog(s: AppSettings, onC: (AppSettings) -> Unit, onClose: () -> Un
                 Text("액자 설정", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Spacer(Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(s.isShuffle, { onC(s.copy(isShuffle = it)) }); Text("랜덤 재생") }
                 Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(s.isHighlightMode, { onC(s.copy(isHighlightMode = it)) }); Text("과거 오늘 사진만 보기") }
+                Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(s.isAutoNightMode, { onC(s.copy(isAutoNightMode = it)) }); Text("지능형 야간 모드 (조도 센서)") }
                 Spacer(Modifier.height(16.dp)); Text("정보창 위치 (Smart Placement)")
                 Row(Modifier.selectableGroup()) {
                     listOf(OverlayPosition.AUTO, OverlayPosition.BOTTOM_LEFT, OverlayPosition.BOTTOM_RIGHT).forEach { pos ->

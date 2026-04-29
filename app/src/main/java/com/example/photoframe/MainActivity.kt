@@ -67,6 +67,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.exifinterface.media.ExifInterface
 import androidx.palette.graphics.Palette
+import androidx.lifecycle.lifecycleScope
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.disk.DiskCache
@@ -76,6 +77,11 @@ import coil.request.SuccessResult
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.objects.ObjectDetection
+import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
 import java.io.File
@@ -104,6 +110,8 @@ class PhotoDbHelper(context: Context) : SQLiteOpenHelper(context, "photos.db", n
     }
 }
 
+data class WeatherInfo(val temp: Double = 0.0, val condition: String = "", val pm10: Int = 0, val pm25: Int = 0)
+
 data class SimplePhoto(val path: String, val width: Int, val height: Int, val exifDate: Long, val lat: Double, val lng: Double)
 enum class TransitionType { FADE, SLIDE_HORIZONTAL, SLIDE_VERTICAL, SCALE }
 enum class OverlayPosition { AUTO, BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT }
@@ -128,6 +136,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var isFlat by mutableStateOf(false)
     private var isSleepTime by mutableStateOf(false)
     private var currentLux by mutableStateOf(100f)
+    private var weatherInfo by mutableStateOf<WeatherInfo?>(null)
 
     val customImageLoader by lazy {
         ImageLoader.Builder(this).memoryCache { MemoryCache.Builder(this).maxSizePercent(0.25).build() }
@@ -140,6 +149,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         registerReceiver(powerReceiver, IntentFilter().apply { addAction(Intent.ACTION_POWER_CONNECTED); addAction(Intent.ACTION_POWER_DISCONNECTED); addAction(Intent.ACTION_BATTERY_CHANGED) })
+        
+        lifecycleScope.launch {
+            while (true) {
+                try { weatherInfo = fetchWeather() } catch (e: Exception) { Log.e("PhotoFrame", "Weather error", e) }
+                delay(TimeUnit.MINUTES.toMillis(30))
+            }
+        }
+
         setContent {
             CompositionLocalProvider(coil.compose.LocalImageLoader provides customImageLoader) {
                 MaterialTheme(colorScheme = darkColorScheme()) {
@@ -151,11 +168,37 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         OverlayPosition.valueOf(prefs.getString("overlay_pos", "AUTO") ?: "AUTO"),
                         prefs.getBoolean("is_auto_night", true)
                     ) }
-                    PhotoFrameScreen(initialSettings, JAE_HYUN_BIRTH_CAL, ::saveSettings, customImageLoader, isSleepTime, isCharging, isFlat, currentLux)
+                    PhotoFrameScreen(initialSettings, JAE_HYUN_BIRTH_CAL, ::saveSettings, customImageLoader, isSleepTime, isCharging, isFlat, currentLux, weatherInfo)
                 }
             }
         }
     }
+
+    private suspend fun fetchWeather(): WeatherInfo = withContext(Dispatchers.IO) {
+        val client = OkHttpClient()
+        val weatherUrl = "https://api.open-meteo.com/v1/forecast?latitude=37.5665&longitude=126.9780&current_weather=true"
+        val airUrl = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=37.5665&longitude=126.9780&current=pm10,pm2_5"
+        
+        val wRes = client.newCall(Request.Builder().url(weatherUrl).build()).execute().body?.string()
+        val aRes = client.newCall(Request.Builder().url(airUrl).build()).execute().body?.string()
+        
+        val wJson = JSONObject(wRes ?: "{}")
+        val aJson = JSONObject(aRes ?: "{}")
+        val current = wJson.optJSONObject("current_weather")
+        val air = aJson.optJSONObject("current")
+        
+        WeatherInfo(
+            temp = current?.optDouble("temperature") ?: 0.0,
+            condition = getWeatherCondition(current?.optInt("weathercode") ?: 0),
+            pm10 = air?.optInt("pm10") ?: 0,
+            pm25 = air?.optInt("pm2_5") ?: 0
+        )
+    }
+
+    private fun getWeatherCondition(code: Int): String = when(code) {
+        0 -> "맑음"; in 1..3 -> "구름조금"; in 45..48 -> "안개"; in 51..67 -> "비"; in 71..77 -> "눈"; in 80..82 -> "소나기"; else -> "흐림"
+    }
+
     private val powerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val s = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
@@ -191,7 +234,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 }
 
 @Composable
-fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSettings: (AppSettings) -> Unit, imageLoader: ImageLoader, isSleepTime: Boolean, isCharging: Boolean, isFlat: Boolean, currentLux: Float) {
+fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSettings: (AppSettings) -> Unit, imageLoader: ImageLoader, isSleepTime: Boolean, isCharging: Boolean, isFlat: Boolean, currentLux: Float, weather: WeatherInfo?) {
     val context = LocalContext.current
     val requiredPermissions = mutableListOf<String>().apply { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.READ_MEDIA_IMAGES) else add(Manifest.permission.READ_EXTERNAL_STORAGE); add(Manifest.permission.ACCESS_MEDIA_LOCATION) }
     var permissionsGranted by remember { mutableStateOf(requiredPermissions.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }) }
@@ -208,7 +251,7 @@ fun PhotoFrameScreen(initialSettings: AppSettings, birthCal: Calendar, onSaveSet
         if (permissionsGranted) {
             if (isStandby) StandbyScreen(isSleepTime, !isCharging, isFlat, isAutoNightActive)
             else {
-                PhotoSlideshow(settings, birthCal, { isSettingsOpen = true }, resetTrigger, imageLoader)
+                PhotoSlideshow(settings, birthCal, { isSettingsOpen = true }, resetTrigger, imageLoader, weather)
                 if (isSettingsOpen) SettingsDialog(settings, { settings = it; onSaveSettings(it) }, { isSettingsOpen = false }, { resetTrigger++ })
             }
         } else Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("권한 필요", color = Color.White) }
@@ -240,7 +283,7 @@ fun StandbyScreen(isSleep: Boolean, isNotCharging: Boolean, isFlat: Boolean, isD
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun PhotoSlideshow(settings: AppSettings, birthCal: Calendar, onOpenSettings: () -> Unit, resetTrigger: Int, imageLoader: ImageLoader) {
+fun PhotoSlideshow(settings: AppSettings, birthCal: Calendar, onOpenSettings: () -> Unit, resetTrigger: Int, imageLoader: ImageLoader, weather: WeatherInfo?) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -267,6 +310,7 @@ fun PhotoSlideshow(settings: AppSettings, birthCal: Calendar, onOpenSettings: ()
     val animScale = remember { Animatable(1f) }; val animTranslationX = remember { Animatable(0f) }; val animTranslationY = remember { Animatable(0f) }; val animRotation = remember { Animatable(0f) }
 
     val faceDetector = remember { FaceDetection.getClient(FaceDetectorOptions.Builder().setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).build()) }
+    val objectDetector = remember { ObjectDetection.getClient(ObjectDetectorOptions.Builder().setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE).enableMultipleObjects().build()) }
     var lastCornerIndex by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit, resetTrigger) {
@@ -332,9 +376,14 @@ fun PhotoSlideshow(settings: AppSettings, birthCal: Calendar, onOpenSettings: ()
                     val r = imageLoader.execute(req)
                     if (r is SuccessResult) {
                         val bmp = r.drawable.toBitmap()
-                        val faces = faceDetector.process(InputImage.fromBitmap(bmp, 0)).await()
-                        align = selectSmartCorner(bmp.width, bmp.height, faces, lastCornerIndex)
+                        val inputImage = InputImage.fromBitmap(bmp, 0)
+                        val faces = faceDetector.process(inputImage).await()
+                        val objects = objectDetector.process(inputImage).await()
+                        
+                        val rects = faces.map { it.boundingBox } + objects.map { it.boundingBox }
+                        align = selectSmartCorner(bmp.width, bmp.height, rects, lastCornerIndex)
                         lastCornerIndex = (lastCornerIndex + 1) % 4
+                        
                         val palette = Palette.from(bmp).generate()
                         val dominant = palette.getVibrantColor(AndroidColor.BLACK)
                         tColor = Color(dominant).copy(alpha = 0.7f)
@@ -383,7 +432,7 @@ fun PhotoSlideshow(settings: AppSettings, birthCal: Calendar, onOpenSettings: ()
                 }
             }
         }
-        metadata?.let { PhotoInfoOverlay(it) }
+        metadata?.let { PhotoInfoOverlay(it, weather) }
         LinearProgressIndicator(progress = slideProgress, modifier = Modifier.fillMaxWidth().height(4.dp).align(Alignment.BottomCenter), color = Color(0xFFFFEB3B).copy(alpha = 0.8f), trackColor = Color.Transparent)
         if (showUI) {
             Row(Modifier.fillMaxSize()) {
@@ -424,7 +473,7 @@ fun SettingsDialog(s: AppSettings, onC: (AppSettings) -> Unit, onClose: () -> Un
 }
 
 @Composable
-fun PhotoInfoOverlay(meta: PhotoMetadata) {
+fun PhotoInfoOverlay(meta: PhotoMetadata, weather: WeatherInfo?) {
     Box(Modifier.fillMaxSize().padding(32.dp)) {
         Surface(modifier = Modifier.align(meta.detectedAlignment).animateContentSize(), color = meta.themeColor, shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.padding(16.dp)) {
@@ -432,17 +481,32 @@ fun PhotoInfoOverlay(meta: PhotoMetadata) {
                 Text(meta.fileName, color = meta.textColor.copy(alpha = 0.6f), fontSize = 12.sp)
                 Text("${meta.date} ${meta.time}", color = meta.textColor, fontSize = 16.sp)
                 meta.location?.let { Text(it, color = meta.textColor.copy(alpha = 0.9f), fontSize = 14.sp) }
+                
+                weather?.let {
+                    Divider(Modifier.padding(vertical = 8.dp), color = meta.textColor.copy(alpha = 0.2f))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.WbSunny, null, tint = Color(0xFFFFEB3B), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("${it.temp}°C ${it.condition}", color = meta.textColor, fontSize = 14.sp)
+                        Spacer(Modifier.width(12.dp))
+                        val dustColor = when { it.pm10 > 80 -> Color.Red; it.pm10 > 30 -> Color(0xFFFFC107); else -> Color.Green }
+                        Text("미세 ${it.pm10}", color = dustColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }
 }
 
-private fun selectSmartCorner(w: Int, h: Int, faces: List<com.google.mlkit.vision.face.Face>, lastIdx: Int): Alignment {
+private fun selectSmartCorner(w: Int, h: Int, subjectRects: List<Rect>, lastIdx: Int): Alignment {
     val corners = listOf(Alignment.BottomStart, Alignment.BottomEnd, Alignment.TopStart, Alignment.TopEnd)
     for (i in 0..3) {
         val nextIdx = (lastIdx + i + 1) % 4
-        val cornerRect = when(nextIdx) { 0 -> Rect(0, h-300, 400, h); 1 -> Rect(w-400, h-300, w, h); 2 -> Rect(0, 0, 400, 300); 3 -> Rect(w-400, 0, w, 300); else -> Rect(0, 0, 0, 0) }
-        if (!faces.any { Rect.intersects(it.boundingBox, cornerRect) }) return corners[nextIdx]
+        val cornerRect = when(nextIdx) { 
+            0 -> Rect(0, h-400, 500, h); 1 -> Rect(w-500, h-400, w, h); 
+            2 -> Rect(0, 0, 500, 400); 3 -> Rect(w-500, 0, w, 400); else -> Rect(0, 0, 0, 0) 
+        }
+        if (!subjectRects.any { Rect.intersects(it, cornerRect) }) return corners[nextIdx]
     }
     return corners[(lastIdx + 1) % 4]
 }
